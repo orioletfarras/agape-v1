@@ -8,7 +8,7 @@ on:
 env:
   AWS_REGION: eu-south-2
   ECR_REPOSITORY: agape-v1
-  EC2_HOST: 18.101.204.68
+  EC2_HOST: 51.94.1.69
   EC2_USER: ubuntu
 
 jobs:
