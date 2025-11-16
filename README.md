@@ -77,3 +77,8 @@ Este es el sistema legacy. La nueva arquitectura hexagonal está en el repositor
 ✅ ECR configured
 ✅ CI/CD configured
 ✅ Ready for production deployment
+
+
+## Deployment
+
+First deployment in progress...
