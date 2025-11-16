@@ -312,9 +312,6 @@ s3 = boto3.client(
     region_name=S3_REGION,
 )
 
-# Configuración de Stripe
-stripe.api_key = os.getenv('STRIPE_SECRET_KEY')
-
 # Configuración de Instagram OAuth (actualiza las variables de entorno o reemplaza los valores)
 # Actualiza los valores en tus variables de entorno o en la configuración:
 INSTAGRAM_CLIENT_ID = os.getenv('INSTAGRAM_CLIENT_ID', '490767650748176')

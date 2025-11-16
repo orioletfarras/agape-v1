@@ -18,6 +18,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY login.py .
 COPY db.py .
 COPY create_push_tokens_table.py .
+COPY push_notification_endpoints.py .
+COPY push_notification_service.py .
 COPY client_secret.json* ./
 
 # Expose port 5002 (internal Docker network)
