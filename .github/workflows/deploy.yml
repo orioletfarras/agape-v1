@@ -2,7 +2,7 @@ name: Deploy Agape V1 to EC2
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, master, staging ]
   workflow_dispatch:
 
 env:
@@ -16,72 +16,112 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
+    - name: Checkout code
+      uses: actions/checkout@v3
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v2
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
+    - name: Set environment variables
+      run: |
+        if [[ "${{ github.ref }}" == "refs/heads/staging" ]]; then
+          echo "ENVIRONMENT=staging" >> $GITHUB_ENV
+          echo "IMAGE_TAG_ENV=staging" >> $GITHUB_ENV
+          echo "CONTAINER_NAME=backend-v1-staging" >> $GITHUB_ENV
+          echo "HEALTH_URL=https://agape.penwin.cloud/api/v1-staging/health" >> $GITHUB_ENV
+        else
+          echo "ENVIRONMENT=production" >> $GITHUB_ENV
+          echo "IMAGE_TAG_ENV=latest" >> $GITHUB_ENV
+          echo "CONTAINER_NAME=backend-v1" >> $GITHUB_ENV
+          echo "HEALTH_URL=https://agape.penwin.cloud/api/v1/health" >> $GITHUB_ENV
+        fi
 
-      - name: Login to Amazon ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v1
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v2
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
 
-      - name: Build, tag, and push image to Amazon ECR
-        env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          IMAGE_TAG: ${{ github.sha }}
-        run: |
-          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
-          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
-          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
-          echo "IMAGE=$ECR_REGISTRY/$ECR_REPOSITORY:latest" >> $GITHUB_ENV
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v1
 
-      - name: Deploy to EC2
-        env:
-          SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
-          IMAGE_TAG: ${{ env.IMAGE_TAG }}
-        run: |
-          echo "$SSH_PRIVATE_KEY" > private_key.pem
-          chmod 600 private_key.pem
+    - name: Build, tag, and push image to Amazon ECR
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        IMAGE_TAG: ${{ github.sha }}
+      run: |
+        echo "🏗️ Building Docker image for ${{ env.ENVIRONMENT }}..."
+        docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+        docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:${{ env.IMAGE_TAG_ENV }}
 
-          ssh -o StrictHostKeyChecking=no -i private_key.pem $EC2_USER@$EC2_HOST << 'EOF'
-            # Login to ECR
-            aws ecr get-login-password --region eu-south-2 | docker login --username AWS --password-stdin 635737031454.dkr.ecr.eu-south-2.amazonaws.com
+        echo "📦 Pushing images to ECR..."
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY:${{ env.IMAGE_TAG_ENV }}
 
-            # Pull latest image
-            cd /home/ubuntu/delejove-v2-backend
-            docker compose pull backend-v1
+        echo "✅ Images pushed successfully:"
+        echo "  - $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+        echo "  - $ECR_REGISTRY/$ECR_REPOSITORY:${{ env.IMAGE_TAG_ENV }}"
 
-            # Deploy with zero-downtime
-            docker compose up -d --no-deps backend-v1
+    - name: Deploy to EC2
+      env:
+        SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+      run: |
+        echo "$SSH_PRIVATE_KEY" > private_key.pem
+        chmod 600 private_key.pem
 
-            # Wait for health check
-            sleep 10
+        echo "🚀 Deploying to ${{ env.ENVIRONMENT }} environment..."
+        ssh -o StrictHostKeyChecking=no -i private_key.pem $EC2_USER@$EC2_HOST << 'EOF'
+          # Login to ECR
+          aws ecr get-login-password --region eu-south-2 | docker login --username AWS --password-stdin 635737031454.dkr.ecr.eu-south-2.amazonaws.com
 
-            # Check if backend-v1 is healthy
-            docker compose ps backend-v1 | grep -q "Up" || exit 1
+          # Pull latest image
+          cd /home/ubuntu/delejove-v2-backend
+          docker compose pull ${{ env.CONTAINER_NAME }}
 
-            # Restart nginx if needed
-            docker compose restart nginx
+          # Deploy with zero-downtime
+          docker compose up -d --no-deps ${{ env.CONTAINER_NAME }}
 
-            # Cleanup old images
-            docker image prune -af --filter "until=24h"
-          EOF
+          # Wait for health check
+          echo "⏳ Waiting for container to be healthy..."
+          sleep 10
 
-          rm -f private_key.pem
+          # Check if backend is healthy
+          docker compose ps ${{ env.CONTAINER_NAME }} | grep -q "Up" || exit 1
 
-      - name: Verify deployment
-        run: |
-          sleep 5
-          curl -f https://agape.penwin.cloud/api/v1/health || exit 1
-          echo "✅ V1 Backend deployment successful!"
+          # Restart nginx if needed
+          docker compose restart nginx
 
-      - name: Notify on failure
-        if: failure()
-        run: |
-          echo "❌ V1 Backend deployment failed!"
+          # Cleanup old images
+          docker image prune -af --filter "until=24h"
+        EOF
+
+        rm -f private_key.pem
+
+    - name: Verify deployment
+      run: |
+        echo "🔍 Verifying deployment at ${{ env.HEALTH_URL }}..."
+        sleep 5
+        curl -f ${{ env.HEALTH_URL }} || exit 1
+        echo "✅ Deployment verified successfully!"
+
+    - name: Deployment Summary
+      run: |
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "🎉 Deployment to ${{ env.ENVIRONMENT }} completed!"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo ""
+        echo "📦 Container: ${{ env.CONTAINER_NAME }}"
+        echo "🏷️  Image Tag: ${{ env.IMAGE_TAG_ENV }}"
+        echo "🔗 Health URL: ${{ env.HEALTH_URL }}"
+        echo ""
+        if [[ "${{ env.ENVIRONMENT }}" == "staging" ]]; then
+          echo "🧪 Staging URL: https://agape.penwin.cloud/api/v1-staging/*"
+        else
+          echo "🌐 Production URL: https://agape.penwin.cloud/api/v1/*"
+        fi
+        echo ""
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+    - name: Notify on failure
+      if: failure()
+      run: |
+        echo "❌ Deployment to ${{ env.ENVIRONMENT }} failed!"
