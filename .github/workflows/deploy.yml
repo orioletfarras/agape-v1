@@ -3,6 +3,8 @@ name: Deploy Agape V1 to EC2
 on:
   push:
     branches: [ main, master, staging ]
+    tags:
+      - 'v*.*.*'  # Trigger on semantic version tags (v1.0.0, v2.1.3, etc.)
   workflow_dispatch:
 
 env:
@@ -21,14 +23,37 @@ jobs:
 
     - name: Set environment variables
       run: |
-        if [[ "${{ github.ref }}" == "refs/heads/staging" ]]; then
+        # Detect if this is a tag or branch
+        if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+          # Semantic version tag
+          VERSION=${GITHUB_REF#refs/tags/v}
+          MAJOR=$(echo $VERSION | cut -d. -f1)
+          MINOR=$(echo $VERSION | cut -d. -f2)
+          PATCH=$(echo $VERSION | cut -d. -f3)
+
+          echo "ENVIRONMENT=production" >> $GITHUB_ENV
+          echo "VERSION=v$VERSION" >> $GITHUB_ENV
+          echo "VERSION_MAJOR=v$MAJOR" >> $GITHUB_ENV
+          echo "VERSION_MINOR=v$MAJOR.$MINOR" >> $GITHUB_ENV
+          echo "VERSION_PATCH=v$MAJOR.$MINOR.$PATCH" >> $GITHUB_ENV
+          echo "IS_RELEASE=true" >> $GITHUB_ENV
+          echo "IMAGE_TAG_ENV=latest" >> $GITHUB_ENV
+          echo "CONTAINER_NAME=backend-v1" >> $GITHUB_ENV
+          echo "HEALTH_URL=https://agape.penwin.cloud/api/v1/health" >> $GITHUB_ENV
+
+          echo "📦 Release build: v$VERSION"
+        elif [[ "${{ github.ref }}" == "refs/heads/staging" ]]; then
+          # Staging branch
           echo "ENVIRONMENT=staging" >> $GITHUB_ENV
           echo "IMAGE_TAG_ENV=staging" >> $GITHUB_ENV
+          echo "IS_RELEASE=false" >> $GITHUB_ENV
           echo "CONTAINER_NAME=backend-v1-staging" >> $GITHUB_ENV
           echo "HEALTH_URL=https://agape.penwin.cloud/api/v1-staging/health" >> $GITHUB_ENV
         else
+          # Production branch (main/master)
           echo "ENVIRONMENT=production" >> $GITHUB_ENV
           echo "IMAGE_TAG_ENV=latest" >> $GITHUB_ENV
+          echo "IS_RELEASE=false" >> $GITHUB_ENV
           echo "CONTAINER_NAME=backend-v1" >> $GITHUB_ENV
           echo "HEALTH_URL=https://agape.penwin.cloud/api/v1/health" >> $GITHUB_ENV
         fi
@@ -51,15 +76,40 @@ jobs:
       run: |
         echo "🏗️ Building Docker image for ${{ env.ENVIRONMENT }}..."
         docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
-        docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:${{ env.IMAGE_TAG_ENV }}
 
-        echo "📦 Pushing images to ECR..."
+        # Always tag with commit SHA
+        echo "📦 Pushing image with SHA tag..."
         docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+
+        # Tag with environment tag (latest/staging)
+        docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:${{ env.IMAGE_TAG_ENV }}
         docker push $ECR_REGISTRY/$ECR_REPOSITORY:${{ env.IMAGE_TAG_ENV }}
 
-        echo "✅ Images pushed successfully:"
+        echo "✅ Images pushed:"
         echo "  - $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
         echo "  - $ECR_REGISTRY/$ECR_REPOSITORY:${{ env.IMAGE_TAG_ENV }}"
+
+        # If this is a semantic version release, create version tags
+        if [[ "${{ env.IS_RELEASE }}" == "true" ]]; then
+          echo "🏷️  Creating semantic version tags..."
+
+          # Tag with full version (v1.2.3)
+          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:${{ env.VERSION_PATCH }}
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:${{ env.VERSION_PATCH }}
+
+          # Tag with minor version (v1.2)
+          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:${{ env.VERSION_MINOR }}
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:${{ env.VERSION_MINOR }}
+
+          # Tag with major version (v1)
+          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:${{ env.VERSION_MAJOR }}
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:${{ env.VERSION_MAJOR }}
+
+          echo "✅ Semantic version tags created:"
+          echo "  - $ECR_REGISTRY/$ECR_REPOSITORY:${{ env.VERSION_PATCH }}"
+          echo "  - $ECR_REGISTRY/$ECR_REPOSITORY:${{ env.VERSION_MINOR }}"
+          echo "  - $ECR_REGISTRY/$ECR_REPOSITORY:${{ env.VERSION_MAJOR }}"
+        fi
 
     - name: Deploy to EC2
       env:
@@ -111,15 +161,50 @@ jobs:
         echo ""
         echo "📦 Container: ${{ env.CONTAINER_NAME }}"
         echo "🏷️  Image Tag: ${{ env.IMAGE_TAG_ENV }}"
+
+        if [[ "${{ env.IS_RELEASE }}" == "true" ]]; then
+          echo "📌 Version: ${{ env.VERSION }}"
+          echo "🔢 Semantic Tags: ${{ env.VERSION_MAJOR }}, ${{ env.VERSION_MINOR }}, ${{ env.VERSION_PATCH }}"
+        fi
+
         echo "🔗 Health URL: ${{ env.HEALTH_URL }}"
         echo ""
+
         if [[ "${{ env.ENVIRONMENT }}" == "staging" ]]; then
           echo "🧪 Staging URL: https://agape.penwin.cloud/api/v1-staging/*"
         else
           echo "🌐 Production URL: https://agape.penwin.cloud/api/v1/*"
         fi
+
         echo ""
         echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+    - name: Create GitHub Release (for version tags)
+      if: env.IS_RELEASE == 'true'
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ env.VERSION }}
+        release_name: Release ${{ env.VERSION }}
+        body: |
+          ## Agape V1 Backend - Release ${{ env.VERSION }}
+
+          Deployed to production at `https://agape.penwin.cloud/api/v1/*`
+
+          ### Docker Images
+          - Full version: `agape-v1:${{ env.VERSION_PATCH }}`
+          - Minor version: `agape-v1:${{ env.VERSION_MINOR }}`
+          - Major version: `agape-v1:${{ env.VERSION_MAJOR }}`
+          - Latest: `agape-v1:latest`
+          - Commit SHA: `agape-v1:${{ github.sha }}`
+
+          ### Deployment Info
+          - Environment: Production
+          - Container: `backend-v1`
+          - Health check: https://agape.penwin.cloud/api/v1/health
+        draft: false
+        prerelease: false
 
     - name: Notify on failure
       if: failure()
